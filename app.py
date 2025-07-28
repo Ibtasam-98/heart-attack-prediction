@@ -9,7 +9,7 @@ ARTIFACTS_DIR = 'model_artifacts'
 
 st.set_page_config(
     page_title="Heart Attack Risk Prediction",
-    page_icon="❤️",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="auto"
 )

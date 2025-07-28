@@ -1,412 +1,73 @@
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.preprocessing import StandardScaler, QuantileTransformer, PolynomialFeatures, RobustScaler
-from sklearn.feature_selection import SelectKBest, mutual_info_classif
-from sklearn.utils import class_weight
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, TerminateOnNaN
-from tensorflow.keras.regularizers import l1_l2
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, \
-    f1_score, roc_auc_score
-import matplotlib.pyplot as plt
-import seaborn as sns
-import tensorflow as tf
 import os
-import joblib  # For saving scikit-learn objects
+from data_preprocessing import load_data, engineer_features, save_preprocessors
+from sklearn.model_selection import train_test_split
 
-# Define directory for saving model and preprocessors
-ARTIFACTS_DIR = 'model_artifacts'
-os.makedirs(ARTIFACTS_DIR, exist_ok=True)
-
-# Create a directory for plots if it doesn't exist
-PLOTS_DIR = 'model_plots'
-os.makedirs(PLOTS_DIR, exist_ok=True)
-
-
-# Enhanced data loading with improved outlier handling
-def load_data():
-    data = pd.read_csv('dataset.csv')
-    data['Result'] = data['Result'].map({'negative': 0, 'positive': 1})
-
-    print("Data Description:\n", data.describe())
-    print("\nClass Distribution:\n", data['Result'].value_counts(normalize=True))
-
-    # Handle outliers using IQR method
-    numeric_cols = data.select_dtypes(include=np.number).columns
-    for col in numeric_cols:
-        Q1 = data[col].quantile(0.25)
-        Q3 = data[col].quantile(0.75)
-        IQR = Q3 - Q1
-        lower_bound = Q1 - 1.5 * IQR
-        upper_bound = Q3 + 1.5 * IQR
-        data[col] = data[col].clip(lower=lower_bound, upper=upper_bound)
-
-    X = data.drop('Result', axis=1)
-    y = data['Result']
-    return X, y
+from model import build_model, get_callbacks, cross_validate
+from evaluation import evaluate_model, plot_cv_metrics, plot_learning_curves
+from sklearn.utils import class_weight
+import numpy as np
+import joblib
+import tensorflow as tf
+from config import ARTIFACTS_DIR, MODEL_CONFIG
 
 
-# Advanced feature engineering
-def engineer_features(X_train, X_test, y_train, feature_names):
-    # Convert to DataFrame to maintain column names for PolynomialFeatures
-    X_train_df = pd.DataFrame(X_train, columns=feature_names)
-    X_test_df = pd.DataFrame(X_test, columns=feature_names)
-
-    # Add Polynomial Features
-    poly = PolynomialFeatures(degree=2, include_bias=False)  # Degree 2 is a good start
-    X_train_poly = poly.fit_transform(X_train_df)
-    X_test_poly = poly.transform(X_test_df)
-
-    print(f"Original features: {X_train.shape[1]}, Polynomial features: {X_train_poly.shape[1]}")
-
-    # Quantile transformation for non-linear relationships
-    # Apply after polynomial features
-    quantile = QuantileTransformer(output_distribution='normal', random_state=42)
-    X_train_qt = quantile.fit_transform(X_train_poly)
-    X_test_qt = quantile.transform(X_test_poly)
-
-    # Mutual information for feature selection
-    # Adjust k if polynomial features drastically increase feature count
-    selector = SelectKBest(mutual_info_classif, k='all')  # Start with 'all' to inspect scores
-    selector.fit(X_train_qt, y_train)
-
-    # Get top 80% of features after polynomial transformation and quantile
-    # You might want to experiment with this percentage
-    k = int(0.80 * X_train_qt.shape[1])
-    # If k becomes 0 for some reason (e.g., very few original features), set a minimum
-    if k == 0 and X_train_qt.shape[1] > 0:
-        k = 1
-    elif k == 0:  # If X_train_qt.shape[1] is also 0, this indicates an issue
-        raise ValueError("No features available after transformations.")
-
-    selected_features_indices = np.argsort(selector.scores_)[-k:]
-    X_train_selected = X_train_qt[:, selected_features_indices]
-    X_test_selected = X_test_qt[:, selected_features_indices]
-
-    print(f"Features after selection: {X_train_selected.shape[1]}")
-
-    # Robust scaling (less sensitive to outliers)
-    scaler = StandardScaler()
-    X_train_scaled_temp = scaler.fit_transform(X_train_selected)
-    X_test_scaled_temp = scaler.transform(X_test_selected)
-
-    # Optional: Add RobustScaler for another layer of robust scaling if needed
-    robust_scaler = RobustScaler()
-    X_train_scaled = robust_scaler.fit_transform(X_train_scaled_temp)
-    X_test_scaled = robust_scaler.transform(X_test_scaled_temp)
-
-    # Return all necessary preprocessors and selected indices
-    return X_train_scaled, X_test_scaled, poly, quantile, selector, scaler, robust_scaler, selected_features_indices
-
-
-# Optimized model architecture with slight modifications
-def build_optimized_model(input_shape):
-    model = Sequential([
-        Dense(512, activation='gelu', input_shape=(input_shape,),
-              kernel_regularizer=l1_l2(l1=0.0001, l2=0.001)),  # Reduced regularization
-        BatchNormalization(),
-        Dropout(0.5),
-        Dense(256, activation='gelu', kernel_regularizer=l1_l2(l1=0.0001, l2=0.001)),
-        BatchNormalization(),
-        Dropout(0.4),
-        Dense(128, activation='gelu'),
-        BatchNormalization(),
-        Dropout(0.3),  # Added another dropout layer
-        Dense(64, activation='gelu'),  # Added another dense layer
-        BatchNormalization(),
-        Dense(1, activation='sigmoid')
-    ])
-
-    optimizer = Adam(learning_rate=0.0001, clipnorm=1.0)  # Keep a low learning rate
-    model.compile(optimizer=optimizer,
-                  loss='binary_crossentropy',
-                  metrics=['accuracy',
-                           tf.keras.metrics.Precision(name='precision'),
-                           tf.keras.metrics.Recall(name='recall'),
-                           tf.keras.metrics.AUC(name='auc')])
-    return model
-
-
-# Enhanced evaluation (now saves plot instead of showing directly)
-def evaluate_model(model, X_test, y_test):
-    y_pred = (model.predict(X_test) > 0.5).astype(int)
-    y_proba = model.predict(X_test)
-
-    print("\nClassification Report:")
-    print(classification_report(y_test, y_pred))
-
-    print("\nConfusion Matrix:")
-    cm = confusion_matrix(y_test, y_pred)
-    plt.figure(figsize=(6, 5))  # Create a new figure for the confusion matrix
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-    plt.title('Confusion Matrix')
-    plt.xlabel('Predicted')
-    plt.ylabel('True')
-    # Save the plot instead of showing it
-    plt.savefig(os.path.join(PLOTS_DIR, 'confusion_matrix.png'))
-    plt.close()  # Close the plot to free memory
-
-    print(f"Confusion Matrix saved to {os.path.join(PLOTS_DIR, 'confusion_matrix.png')}")
-
-    metrics = {
-        'accuracy': accuracy_score(y_test, y_pred),
-        'precision': precision_score(y_test, y_pred),
-        'recall': recall_score(y_test, y_pred),
-        'f1': f1_score(y_test, y_pred),
-        'roc_auc': roc_auc_score(y_test, y_proba)
-    }
-    return metrics
-
-
-# Cross-validation training
-def cross_validate(X, y, n_splits=5):
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)  # Added shuffle and random_state
-    cv_metrics_list = []  # Renamed to avoid conflict with the mean dictionary
-
-    # Compute class weights for imbalanced dataset
-    class_weights = class_weight.compute_class_weight(
-        'balanced', classes=np.unique(y), y=y
-    )
-    class_weight_dict = dict(enumerate(class_weights))
-    print(f"Class weights for CV: {class_weight_dict}")
-
-    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y)):
-        print(f"\n--- Fold {fold + 1}/{n_splits} ---")
-        X_train, X_val = X[train_idx], X[val_idx]
-        y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
-
-        model = build_optimized_model(X_train.shape[1])
-
-        callbacks_cv = [
-            EarlyStopping(monitor='val_auc', patience=25, mode='max', restore_best_weights=True, verbose=0),
-            ReduceLROnPlateau(monitor='val_auc', factor=0.5, patience=15, mode='max', min_lr=1e-6, verbose=0),
-            TerminateOnNaN()
-        ]
-
-        history = model.fit(
-            X_train, y_train,
-            validation_data=(X_val, y_val),
-            epochs=200,  # Increased epochs for CV
-            batch_size=32,
-            verbose=0,  # Set to 0 for less verbose CV output
-            callbacks=callbacks_cv,
-            class_weight=class_weight_dict
-        )
-        # We collect metrics for CV but do NOT plot confusion matrix for each fold
-        # as it will be overwhelming and is intended for final model evaluation
-        y_pred_cv = (model.predict(X_val) > 0.5).astype(int)
-        y_proba_cv = model.predict(X_val)
-
-        metrics = {
-            'accuracy': accuracy_score(y_val, y_pred_cv),
-            'precision': precision_score(y_val, y_pred_cv),
-            'recall': recall_score(y_val, y_pred_cv),
-            'f1': f1_score(y_val, y_pred_cv),
-            'roc_auc': roc_auc_score(y_val, y_proba_cv)
-        }
-        print(f"Fold {fold + 1} Metrics: {metrics}")
-        cv_metrics_list.append(metrics)
-
-    # Return both the list of metrics per fold and the mean metrics
-    return cv_metrics_list, pd.DataFrame(cv_metrics_list).mean().to_dict()
-
-
-if __name__ == "__main__":
+def main():
     # Load and prepare data
     X, y = load_data()
-    feature_names = X.columns.tolist()  # Get original feature names
+    feature_names = X.columns.tolist()
 
-    # Split data before feature engineering to prevent data leakage
-    X_train_raw, X_test_raw, y_train, y_test = train_test_split(X, y, test_size=0.15, random_state=42, stratify=y)
+    # Split data
+    X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+        X, y, test_size=MODEL_CONFIG['test_size'],
+        random_state=MODEL_CONFIG['random_state'], stratify=y
+    )
 
-    # Feature engineering applied separately to train and test
-    X_train_scaled, X_test_scaled, poly_transformer, quantile_transformer, \
-        selector_kbest, standard_scaler, robust_scaler, selected_indices = \
+    # Feature engineering
+    X_train_scaled, X_test_scaled, poly, quantile, selector, scaler, robust_scaler, selected_indices = \
         engineer_features(X_train_raw.values, X_test_raw.values, y_train, feature_names)
 
     # Cross-validation
     print("\n--- Cross-Validation Results ---")
-    cv_individual_fold_metrics, cv_mean_metrics = cross_validate(X_train_scaled, y_train, n_splits=7)
+    cv_individual_fold_metrics, cv_mean_metrics = cross_validate(X_train_scaled, y_train)
     print("\nCV Results (Mean across folds):")
-    print(f"{'Metric':<10} {'Value':<10}")
-    print(f"{'-' * 20}")
     for name, value in cv_mean_metrics.items():
         print(f"{name:<10} {value:<10.4f}")
 
-    # NEW: Plot Cross-Validation Metrics like the attached visualization
-    plt.figure(figsize=(12, 7))
-
-    # Convert the list of dictionaries to a DataFrame
-    cv_df = pd.DataFrame(cv_individual_fold_metrics)
-    # Add a 'Fold' column for plotting
-    cv_df['Fold'] = range(1, len(cv_df) + 1)
-
-    # Melt the DataFrame to long format for seaborn.lineplot
-    # We want to plot each metric as a separate line
-    cv_melted_df = cv_df.melt(id_vars=['Fold'], var_name='Metric', value_name='Value')
-
-    sns.lineplot(data=cv_melted_df, x='Fold', y='Value', hue='Metric', marker='o', markersize=8, linewidth=2)
-
-    plt.title('Cross-Validation Metrics Across Folds', fontsize=16)
-    plt.xlabel('Fold Number', fontsize=12)
-    plt.ylabel('Metric Value', fontsize=12)
-    plt.ylim(0, 1.05)  # Metrics are typically between 0 and 1
-    plt.xticks(range(1, len(cv_df) + 1))  # Ensure integer ticks for folds
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.legend(title='Metric', bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout()
-    plt.savefig(os.path.join(PLOTS_DIR, 'cv_metrics_across_folds.png'))
-    plt.close()
-    print(
-        f"Cross-Validation Metrics Across Folds plot saved to {os.path.join(PLOTS_DIR, 'cv_metrics_across_folds.png')}")
+    plot_cv_metrics(cv_individual_fold_metrics)
 
     # Final model training
     print("\n--- Final Model Training ---")
-    model = build_optimized_model(X_train_scaled.shape[1])
+    model = build_model(X_train_scaled.shape[1])
 
-    # Compute class weights for final model training
-    class_weights_final = class_weight.compute_class_weight(
-        'balanced', classes=np.unique(y_train), y=y_train
-    )
-    class_weight_dict_final = dict(enumerate(class_weights_final))
-    print(f"Class weights for Final Model: {class_weight_dict_final}")
-
-    callbacks_final = [
-        EarlyStopping(monitor='val_auc', patience=30, mode='max', restore_best_weights=True, verbose=1),
-        ReduceLROnPlateau(monitor='val_auc', factor=0.5, patience=15, mode='max', min_lr=1e-7, verbose=1),
-        TerminateOnNaN()
-    ]
+    class_weights = class_weight.compute_class_weight('balanced', classes=np.unique(y_train), y=y_train)
+    class_weight_dict = dict(enumerate(class_weights))
+    print(f"Class weights for Final Model: {class_weight_dict}")
 
     history = model.fit(
         X_train_scaled, y_train,
-        epochs=300,  # Increased epochs
-        batch_size=32,
-        validation_split=0.15,
-        callbacks=callbacks_final,
+        epochs=MODEL_CONFIG['epochs'],
+        batch_size=MODEL_CONFIG['batch_size'],
+        validation_split=MODEL_CONFIG['validation_split'],
+        callbacks=get_callbacks(),
         verbose=1,
-        class_weight=class_weight_dict_final  # Apply class weights
+        class_weight=class_weight_dict
     )
 
     # Evaluation
     print("\n--- Evaluating Final Model on Test Set ---")
     final_metrics = evaluate_model(model, X_test_scaled, y_test)
     print("\n--- Final Test Metrics ---")
-    # Print final metrics in a more structured table format
-    print(f"{'Metric':<10} {'Value':<10}")
-    print(f"{'-' * 20}")
     for name, value in final_metrics.items():
         print(f"{name:<10} {value:<10.4f}")
 
-    # Plot final test metrics as a bar graph (Keeping this as it's good for single point comparison)
-    plt.figure(figsize=(8, 6))
-    metrics_names = list(final_metrics.keys())
-    metrics_values = list(final_metrics.values())
-    sns.barplot(x=metrics_names, y=metrics_values, palette='viridis')
-    plt.title('Final Model Test Metrics')
-    plt.ylabel('Score')
-    plt.ylim(0, 1.0)  # Metrics are between 0 and 1
-    # Add value labels on top of bars
-    for index, value in enumerate(metrics_values):
-        plt.text(index, value + 0.02, f"{value:.4f}", ha='center', va='bottom')
-    plt.tight_layout()
-    plt.savefig(os.path.join(PLOTS_DIR, 'final_test_metrics_bar_chart.png'))
-    plt.close()
-    print(f"Final test metrics bar chart saved to {os.path.join(PLOTS_DIR, 'final_test_metrics_bar_chart.png')}")
+    plot_learning_curves(history)
 
-    # Plot combined training history (Accuracy and Loss learning curves) - This plot is already good
-    plt.figure(figsize=(10, 6))
-
-    # Plot Accuracy
-    plt.plot(history.history['accuracy'], label='Train Accuracy', color='blue')
-    plt.plot(history.history['val_accuracy'], label='Validation Accuracy', color='skyblue', linestyle='--')
-
-    # Plot Loss on a secondary y-axis
-    ax2 = plt.gca().twinx()  # Get current axes and create a twin
-    ax2.plot(history.history['loss'], label='Train Loss', color='red')
-    ax2.plot(history.history['val_loss'], label='Validation Loss', color='salmon', linestyle='--')
-
-    plt.title('Model Accuracy and Loss Learning Curves')
-    plt.xlabel('Epoch')
-    plt.ylabel('Accuracy', color='blue')
-    ax2.set_ylabel('Loss', color='red')
-
-    # Combine legends
-    lines, labels = plt.gca().get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax2.legend(lines + lines2, labels + labels2, loc='center right')
-
-    plt.grid(True)
-    plt.tight_layout()  # Adjust layout to prevent overlapping titles/labels
-    # Save the plot instead of showing it
-    plt.savefig(os.path.join(PLOTS_DIR, 'combined_learning_curves.png'))
-    plt.close()  # Close the plot to free memory
-
-    print(f"Combined Learning Curves saved to {os.path.join(PLOTS_DIR, 'combined_learning_curves.png')}")
-
-    print(f"\nAll visualizations are saved in the '{PLOTS_DIR}' directory.")
-
-    # --- Save the trained model and preprocessors ---
+    # Save artifacts
     print(f"\nSaving model and preprocessors to '{ARTIFACTS_DIR}' directory...")
     model.save(os.path.join(ARTIFACTS_DIR, 'heart_attack_model.h5'))
-    joblib.dump(poly_transformer, os.path.join(ARTIFACTS_DIR, 'poly_transformer.pkl'))
-    joblib.dump(quantile_transformer, os.path.join(ARTIFACTS_DIR, 'quantile_transformer.pkl'))
-    joblib.dump(selector_kbest, os.path.join(ARTIFACTS_DIR, 'selector_kbest.pkl'))
-    joblib.dump(standard_scaler, os.path.join(ARTIFACTS_DIR, 'standard_scaler.pkl'))
-    joblib.dump(robust_scaler, os.path.join(ARTIFACTS_DIR, 'robust_scaler.pkl'))
-    joblib.dump(selected_indices, os.path.join(ARTIFACTS_DIR, 'selected_indices.pkl'))
-    joblib.dump(feature_names, os.path.join(ARTIFACTS_DIR, 'feature_names.pkl'))
-    joblib.dump(final_metrics, os.path.join(ARTIFACTS_DIR, 'final_metrics.pkl'))  # Save final metrics
-    print("Model and preprocessors saved successfully!")
+    save_preprocessors(poly, quantile, selector, scaler, robust_scaler, selected_indices, feature_names, final_metrics)
+    print("Training completed successfully!")
 
 
-    # Function to get user input and make prediction - NOT USED IN FLASK APP DIRECTLY
-    # This part can be removed or kept for command line testing if desired.
-    def predict_user_input(model, feature_names, poly_transformer, quantile_transformer,
-                           selector_kbest, standard_scaler, robust_scaler, selected_indices):
-        print("\n=== Heart Attack Risk Prediction ===")
-        print("Please enter the following health metrics:")
-
-        user_data = {}
-        for feature in feature_names:
-            while True:
-                try:
-                    value = float(input(f"Enter {feature}: "))
-                    user_data[feature] = value
-                    break
-                except ValueError:
-                    print("Please enter a valid number.")
-
-        # Convert to DataFrame
-        user_df = pd.DataFrame([user_data])
-
-        # Apply all the same transformations as training data
-        # 1. Polynomial features
-        user_poly = poly_transformer.transform(user_df)
-
-        # 2. Quantile transformation
-        user_qt = quantile_transformer.transform(user_poly)
-
-        # 3. Feature selection
-        user_selected = user_qt[:, selected_indices]
-
-        # 4. Scaling
-        user_scaled_temp = standard_scaler.transform(user_selected)
-        user_scaled = robust_scaler.transform(user_scaled_temp)
-
-        # Make prediction
-        prediction_proba = model.predict(user_scaled)[0][0]
-        prediction_class = "positive" if prediction_proba > 0.5 else "negative"
-
-        print("\n=== Prediction Result ===")
-        print(f"Heart Attack Risk Probability: {prediction_proba:.4f}")
-        print(f"Prediction: {prediction_class}")
-
-        if prediction_proba > 0.5:
-            print("Warning: High risk of heart attack detected. Please consult a doctor.")
-        else:
-            print("Low risk of heart attack detected. Maintain a healthy lifestyle.")
-
-        return prediction_proba, prediction_class
+if __name__ == "__main__":
+    main()
