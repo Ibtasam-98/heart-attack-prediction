@@ -5,10 +5,8 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 
-# Define directory for saving model and preprocessors
 ARTIFACTS_DIR = 'model_artifacts'
 
-# Set page configuration
 st.set_page_config(
     page_title="Heart Attack Risk Prediction",
     page_icon="❤️",
@@ -17,7 +15,6 @@ st.set_page_config(
 )
 
 
-# --- Load the trained model and preprocessors ---
 @st.cache_resource
 def load_artifacts():
     try:
