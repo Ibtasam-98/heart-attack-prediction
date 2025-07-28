@@ -14,12 +14,6 @@ A machine learning system that predicts the risk of heart attack based on patien
 ## Table of Contents
 - [Features](#features)
 - [Dataset](#dataset)
-- [Technical Approach](#technical-approach)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Results](#results)
-- [Contributing](#contributing)
-- [License](#license)
 
 ## Features
 
@@ -55,14 +49,3 @@ The model was trained on clinical data containing the following features:
 | Blood sugar | Glucose level (mg/dL) | <140 |
 | CK-MB | Cardiac enzyme (ng/mL) | 0-5 |
 | Troponin | Cardiac biomarker (ng/mL) | <0.04 |
-
-## Technical Approach
-
-1. **Data Preprocessing**:
-   - Outlier handling with IQR method
-   - Stratified train-test split (85-15)
-   - Class balancing with inverse frequency weighting
-
-2. **Feature Engineering**:
-   ```python
-   PolynomialFeatures → QuantileTransformer → SelectKBest → StandardScaler → RobustScaler
