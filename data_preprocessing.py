@@ -1,3 +1,4 @@
+
 import os
 
 import pandas as pd
@@ -84,3 +85,17 @@ def save_preprocessors(poly, quantile, selector, scaler, robust_scaler, selected
     joblib.dump(feature_names, os.path.join(ARTIFACTS_DIR, 'feature_names.pkl'))
     joblib.dump(metrics, os.path.join(ARTIFACTS_DIR, 'final_metrics.pkl'))
     print("Preprocessors saved successfully!")
+
+def print_dataset_info(data, y):
+    print("\n" + "="*60)
+    print("DATASET CHARACTERISTICS AND CLASS DISTRIBUTION")
+    print("="*60)
+    print(f"Total samples: {len(data)}")
+    print(f"Number of features: {data.shape[1]}")
+    print(f"\nClass Distribution:")
+    class_counts = y.value_counts()
+    class_percentages = y.value_counts(normalize=True) * 100
+    for class_val, count in class_counts.items():
+        percentage = class_percentages[class_val]
+        class_name = "Positive" if class_val == 1 else "Negative"
+        print(f"  {class_name} (Class {class_val}): {count} samples ({percentage:.2f}%)")
