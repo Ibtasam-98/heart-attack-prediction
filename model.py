@@ -1,54 +1,39 @@
 import numpy as np
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix
 from sklearn.utils import class_weight
 from sklearn.model_selection import StratifiedKFold
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, TerminateOnNaN
-from tensorflow.keras.regularizers import l1_l2
-import tensorflow as tf
-from config import MODEL_CONFIG
+from sklearn.neural_network import MLPClassifier
 import pandas as pd
+import time
+from config import MODEL_CONFIG
+
 
 def build_model(input_shape):
-    model = Sequential([
-        Dense(512, activation='gelu', input_shape=(input_shape,),
-              kernel_regularizer=l1_l2(l1=0.0001, l2=0.001)),
-        BatchNormalization(),
-        Dropout(0.5),
-        Dense(256, activation='gelu', kernel_regularizer=l1_l2(l1=0.0001, l2=0.001)),
-        BatchNormalization(),
-        Dropout(0.4),
-        Dense(128, activation='gelu'),
-        BatchNormalization(),
-        Dropout(0.3),
-        Dense(64, activation='gelu'),
-        BatchNormalization(),
-        Dense(1, activation='sigmoid')
-    ])
+    """Build MLP classifier with similar architecture to the original neural network"""
+    return MLPClassifier(
+        hidden_layer_sizes=(512, 256, 128, 64),
+        activation='relu',
+        solver='adam',
+        alpha=0.001,
+        batch_size=MODEL_CONFIG['batch_size'],
+        learning_rate='adaptive',
+        learning_rate_init=MODEL_CONFIG['learning_rate'],
+        max_iter=MODEL_CONFIG['epochs'],
+        early_stopping=True,
+        validation_fraction=MODEL_CONFIG['validation_split'],
+        n_iter_no_change=MODEL_CONFIG['early_stopping_patience'],
+        random_state=MODEL_CONFIG['random_state']
+    )
 
-    optimizer = Adam(learning_rate=MODEL_CONFIG['learning_rate'], clipnorm=1.0)
-    model.compile(optimizer=optimizer,
-                loss='binary_crossentropy',
-                metrics=['accuracy',
-                         tf.keras.metrics.Precision(name='precision'),
-                         tf.keras.metrics.Recall(name='recall'),
-                         tf.keras.metrics.AUC(name='auc')])
-    return model
 
 def get_callbacks():
-    return [
-        EarlyStopping(monitor='val_auc', patience=MODEL_CONFIG['early_stopping_patience'],
-                     mode='max', restore_best_weights=True, verbose=1),
-        ReduceLROnPlateau(monitor='val_auc', factor=0.5, patience=MODEL_CONFIG['reduce_lr_patience'],
-                         mode='max', min_lr=MODEL_CONFIG['min_lr'], verbose=1),
-        TerminateOnNaN()
-    ]
+    return []
+
 
 def cross_validate(X, y, n_splits=MODEL_CONFIG['cv_splits']):
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=MODEL_CONFIG['random_state'])
     cv_metrics_list = []
+    fold_times = []
 
     class_weights = class_weight.compute_class_weight('balanced', classes=np.unique(y), y=y)
     class_weight_dict = dict(enumerate(class_weights))
@@ -60,27 +45,41 @@ def cross_validate(X, y, n_splits=MODEL_CONFIG['cv_splits']):
         y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
         model = build_model(X_train.shape[1])
-        model.fit(
-            X_train, y_train,
-            validation_data=(X_val, y_val),
-            epochs=200,
-            batch_size=MODEL_CONFIG['batch_size'],
-            verbose=0,
-            callbacks=get_callbacks(),
-            class_weight=class_weight_dict
-        )
 
-        y_pred_cv = (model.predict(X_val) > 0.5).astype(int)
-        y_proba_cv = model.predict(X_val)
+        start_time = time.time()
+        model.fit(X_train, y_train)
+        fold_time = time.time() - start_time
+        fold_times.append(fold_time)
+
+        y_pred_cv = model.predict(X_val)
+        y_proba_cv = model.predict_proba(X_val)[:, 1]
+
+        # Calculate confusion matrix components
+        cm = confusion_matrix(y_val, y_pred_cv)
+        tn, fp, fn, tp = cm.ravel()
+        error_rate = (fp + fn) / (tp + tn + fp + fn)
 
         metrics = {
             'accuracy': accuracy_score(y_val, y_pred_cv),
             'precision': precision_score(y_val, y_pred_cv),
             'recall': recall_score(y_val, y_pred_cv),
             'f1': f1_score(y_val, y_pred_cv),
-            'roc_auc': roc_auc_score(y_val, y_proba_cv)
+            'roc_auc': roc_auc_score(y_val, y_proba_cv),
+            'training_time': fold_time,
+            'tp': tp, 'tn': tn, 'fp': fp, 'fn': fn,
+            'error_rate': error_rate
         }
-        print(f"Fold {fold + 1} Metrics: {metrics}")
+
+        print(f"Fold {fold + 1} Detailed Results:")
+        print(f"  Accuracy:    {metrics['accuracy']:.4f}")
+        print(f"  Precision:   {metrics['precision']:.4f}")
+        print(f"  Recall:      {metrics['recall']:.4f}")
+        print(f"  F1-Score:    {metrics['f1']:.4f}")
+        print(f"  ROC-AUC:     {metrics['roc_auc']:.4f}")
+        print(f"  Training Time: {metrics['training_time']:.2f}s")
+        print(f"  Confusion Matrix: TP={tp}, TN={tn}, FP={fp}, FN={fn}")
+        print(f"  Error Rate:      {metrics['error_rate']:.4f}")
+
         cv_metrics_list.append(metrics)
 
-    return cv_metrics_list, pd.DataFrame(cv_metrics_list).mean().to_dict()
+    return cv_metrics_list, pd.DataFrame(cv_metrics_list).mean().to_dict(), fold_times
