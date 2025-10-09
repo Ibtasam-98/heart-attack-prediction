@@ -11,10 +11,6 @@ A machine learning system that predicts the risk of heart attack based on patien
 - Interactive web interface
 - Detailed performance metrics
 
-## Table of Contents
-- [Features](#features)
-- [Dataset](#dataset)
-
 ## Features
 
 ### Model Architecture
