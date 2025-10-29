@@ -1,23 +1,37 @@
-
 import os
-
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, QuantileTransformer, PolynomialFeatures, RobustScaler
+from sklearn.preprocessing import StandardScaler, QuantileTransformer, PolynomialFeatures, RobustScaler, LabelEncoder
 from sklearn.feature_selection import SelectKBest, mutual_info_classif
 import joblib
 from config import ARTIFACTS_DIR, PLOTS_DIR, MODEL_CONFIG
 
+
 def load_data():
     data = pd.read_csv('dataset/dataset.csv')
+
+    # Convert Result column
     data['Result'] = data['Result'].map({'negative': 0, 'positive': 1})
 
-    print("Data Description:\n", data.describe())
+    # Handle categorical variables (like Gender)
+    categorical_columns = data.select_dtypes(include=['object']).columns
+    categorical_columns = categorical_columns[categorical_columns != 'Result']  # Exclude target
+
+    label_encoders = {}
+    for col in categorical_columns:
+        le = LabelEncoder()
+        data[col] = le.fit_transform(data[col])
+        label_encoders[col] = le
+        print(f"Encoded {col}: {dict(zip(le.classes_, le.transform(le.classes_)))}")
+
+    print("\nData Description:\n", data.describe())
     print("\nClass Distribution:\n", data['Result'].value_counts(normalize=True))
 
     # Handle outliers using IQR method
     numeric_cols = data.select_dtypes(include=np.number).columns
+    numeric_cols = numeric_cols[numeric_cols != 'Result']  # Exclude target
+
     for col in numeric_cols:
         Q1 = data[col].quantile(0.25)
         Q3 = data[col].quantile(0.75)
@@ -28,10 +42,14 @@ def load_data():
 
     X = data.drop('Result', axis=1)
     y = data['Result']
+
+    # Save label encoders for prediction
+    joblib.dump(label_encoders, os.path.join(ARTIFACTS_DIR, 'label_encoders.pkl'))
+
     return X, y
 
+
 def engineer_features(X_train, X_test, y_train, feature_names):
-    # Convert to DataFrame to maintain column names for PolynomialFeatures
     X_train_df = pd.DataFrame(X_train, columns=feature_names)
     X_test_df = pd.DataFrame(X_test, columns=feature_names)
 
@@ -75,6 +93,7 @@ def engineer_features(X_train, X_test, y_train, feature_names):
 
     return X_train_scaled, X_test_scaled, poly, quantile, selector, scaler, robust_scaler, selected_features_indices
 
+
 def save_preprocessors(poly, quantile, selector, scaler, robust_scaler, selected_indices, feature_names, metrics):
     joblib.dump(poly, os.path.join(ARTIFACTS_DIR, 'poly_transformer.pkl'))
     joblib.dump(quantile, os.path.join(ARTIFACTS_DIR, 'quantile_transformer.pkl'))
@@ -85,17 +104,3 @@ def save_preprocessors(poly, quantile, selector, scaler, robust_scaler, selected
     joblib.dump(feature_names, os.path.join(ARTIFACTS_DIR, 'feature_names.pkl'))
     joblib.dump(metrics, os.path.join(ARTIFACTS_DIR, 'final_metrics.pkl'))
     print("Preprocessors saved successfully!")
-
-def print_dataset_info(data, y):
-    print("\n" + "="*60)
-    print("DATASET CHARACTERISTICS AND CLASS DISTRIBUTION")
-    print("="*60)
-    print(f"Total samples: {len(data)}")
-    print(f"Number of features: {data.shape[1]}")
-    print(f"\nClass Distribution:")
-    class_counts = y.value_counts()
-    class_percentages = y.value_counts(normalize=True) * 100
-    for class_val, count in class_counts.items():
-        percentage = class_percentages[class_val]
-        class_name = "Positive" if class_val == 1 else "Negative"
-        print(f"  {class_name} (Class {class_val}): {count} samples ({percentage:.2f}%)")
