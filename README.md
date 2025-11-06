@@ -29,7 +29,6 @@ A machine learning system that predicts the risk of heart attack based on patien
 - Interactive input form for health metrics
 - Real-time risk prediction
 - Model performance visualization
-- Mobile-responsive design
 
 ## Dataset
 
